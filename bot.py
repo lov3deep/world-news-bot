@@ -1,124 +1,189 @@
 import os
-import datetime
 import requests
-import json
+import tweepy
+from dotenv import load_dotenv
+from datetime import datetime
+from google import genai # Import the official Gemini SDK
+from google.genai import types
 
-# === CONFIGURATION ===
-XAI_API_KEY = "your_xai_api_key_here"  # From console.x.ai
-X_CONSUMER_KEY = "your_x_consumer_key"
-X_CONSUMER_SECRET = "your_x_consumer_secret"
-X_ACCESS_TOKEN = "your_x_access_token"
-X_ACCESS_SECRET = "your_x_access_token_secret"  # Fixed name
+load_dotenv()
 
-TOP_N = 5
-MODEL = "grok-4"  # Or "grok-beta" / latest available
+# --- Configuration for X/Twitter ---
+# Initialize the Twitter client (added try/except for safer execution)
+try:
+    client = tweepy.Client(
+        consumer_key=os.getenv("X_CONSUMER_KEY"),
+        consumer_secret=os.getenv("X_CONSUMER_SECRET"),
+        access_token=os.getenv("X_ACCESS_TOKEN"),
+        access_token_secret=os.getenv("X_ACCESS_TOKEN_SECRET")
+    )
+except Exception as e:
+    print(f"Warning: Twitter client setup failed. Tweets will not be posted. Error: {e}")
+    client = None
 
-# Grok prompt to get top news
-NEWS_PROMPT = """
-Provide a concise list of the top 5 most important worldwide news stories right now (last hour if possible).
-For each story:
-- Number it (1 to 5)
-- Give a short engaging headline (under 20 words)
-- One-sentence summary
-- Main source (e.g., Reuters, BBC) if known
-- Direct article link if available
+# --- Configuration for Gemini API ---
+# Get the key from the environment variable GEMINI_API_KEY
+# You can get a key at Google AI Studio or Google Cloud Console.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") 
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY not found in environment variables. Please set it in your .env file.")
 
-Focus on global impact, breaking events, politics, tech, disasters, etc.
-Rank by worldwide discussion and importance.
-Output only the numbered list — no intro text.
+# Initialize the Gemini Client
+try:
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+except Exception as e:
+    print(f"Error initializing Gemini client: {e}")
+    gemini_client = None
+
+# --- Prompt for the AI ---
+PROMPT = """
+Give me the top 5 most important worldwide news stories right now in this exact format (no extra text, strictly follow the format):
+
+1. [Short engaging headline]
+[One-sentence summary]
+Source: [Main source]
+Link: [Direct URL]
+
+2. [Short engaging headline]
+[One-sentence summary]
+Source: [Main source]
+Link: [Direct URL]
+
+3. ... (Continue up to 5)
+
+Rank by global impact and recency.
 """
 
-def fetch_top_news_via_grok():
-    headers = {
-        "Authorization": f"Bearer {XAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": MODEL,
-        "messages": [{"role": "user", "content": NEWS_PROMPT}],
-        "temperature": 0.7,
-        "max_tokens": 800,
-        # Enable real-time search/tools for fresh news
-        "search_parameters": {"mode": "auto"}  # Or enable_search: true if needed
-    }
-
-    response = requests.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
+def fetch_news_gemini():
+    if gemini_client is None:
+        return []
+        
+    print("Fetching real-time news using Gemini and Google Search tool...")
     
-    if response.status_code != 200:
-        print(f"Error: {response.status_code} {response.text}")
+    try:
+        # Use the generate_content method and enable the google_search tool
+        # Gemini 2.5 Flash is fast and capable of using the search tool.
+        response = gemini_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=PROMPT,
+            config=types.GenerateContentConfig(
+                tools=[{"google_search": {}}] # This enables the real-time search
+            )
+        )
+    except Exception as e:
+        print(f"Gemini API request failed: {e}")
         return []
 
-    content = response.json()["choices"][0]["message"]["content"].strip()
-    lines = [line.strip() for line in content.split("\n") if line.strip() and not line.startswith("**")]
+    content = response.text
+    print(f"Successfully received response from Gemini. Content length: {len(content)}")
     
+    # --- Robust Parsing (Adapted for consistent output) ---
     stories = []
-    current = {}
-    for line in lines:
-        if line.startswith(("1.", "2.", "3.", "4.", "5.")):
-            if current:
-                stories.append(current)
-            current = {"num": line.split(".", 1)[0], "text": line.split(".", 1)[1].strip()}
-        elif "http" in line:
-            current["url"] = line
-        elif "Source:" in line.lower():
-            current["source"] = line
-        else:
-            current["text"] += " " + line
-    if current:
-        stories.append(current)
+    # Split content into blocks, using an aggressive delimiter that handles extra newlines
+    blocks = [b.strip() for b in content.split('\n\n') if b.strip()]
     
-    return stories[:TOP_N]
+    for block in blocks:
+        # Check if the block starts with a number followed by a dot (e.g., "1.")
+        if block.startswith(('1.', '2.', '3.', '4.', '5.')):
+            lines = [line.strip() for line in block.split('\n') if line.strip()]
+            
+            # Simple check for minimum expected lines
+            if len(lines) < 4:
+                continue
 
-def post_engaging_thread(stories):
+            try:
+                # 1. Headline (from the first line, after the number and dot)
+                headline = lines[0].split('.', 1)[1].strip()
+                
+                # 2. Summary (usually the second line)
+                summary = lines[1]
+                
+                # 3. Source (find the line starting with "Source:")
+                source = next((line.replace("Source:", "").strip() for line in lines if line.startswith("Source:")), "N/A")
+                
+                # 4. Link (find the line starting with "Link:")
+                link = next((line.replace("Link:", "").strip() for line in lines if line.startswith("Link:")), "N/A")
+                
+                stories.append({"headline": headline, "summary": summary, "source": source, "link": link})
+            except (IndexError, AttributeError):
+                print(f"Warning: Skipping malformed story block: {block[:50]}...")
+                continue
+                
+    return stories
+
+def post_thread(stories):
     if not stories:
-        print("No news stories fetched.")
+        print("No stories to post.")
         return
-
-    # Use requests for posting (simple v2 endpoint)
-    auth_headers = {
-        "Authorization": f"Bearer {os.getenv('X_BEARER_TOKEN', '')}",  # If you have it
-        "Content-Type": "application/json"
-    }
-    # Better: Use OAuth1 for posting (install requests-oauthlib or keep tweepy for posting only)
-    # Keeping tweepy for posting since it's easy
-    import tweepy
-    client = tweepy.Client(
-        consumer_key=X_CONSUMER_KEY,
-        consumer_secret=X_CONSUMER_SECRET,
-        access_token=X_ACCESS_TOKEN,
-        access_token_secret=X_ACCESS_SECRET
-    )
-
-    intro = "🌍 Top World News This Hour (via Grok real-time search):\n\n"
-    first_text = intro + f"🔥 {stories[0].get('num', '1')}. {stories[0].get('text', '')}"
-    if "url" in stories[0]:
-        first_text += f"\n🔗 {stories[0]['url']}"
-    first_text += "\n\n#WorldNews #BreakingNews"
-
-    resp = client.create_tweet(text=first_text)
-    if not resp.data:
+    
+    if client is None:
+        print("Twitter client not initialized. Skipping posting.")
         return
-    prev_id = resp.data.id
-
-    for story in stories[1:]:
-        text = f"{story.get('num', '')}. {story.get('text', '')}"
-        if "url" in story:
-            text += f"\n🔗 {story['url']}"
-        text += f"\n\n(Thread) #WorldNews"
         
-        resp = client.create_tweet(text=text, in_reply_to_tweet_id=prev_id)
-        if resp.data:
-            prev_id = resp.data.id
+    print(f"Posting {len(stories)} stories to X/Twitter...")
 
-    # Engagement booster
-    client.create_tweet(text="Which story surprises you most? Reply below! 👇", in_reply_to_tweet_id=prev_id)
+    # --- Post Tweet 1 (The main tweet/thread starter) ---
+    intro = f"🌍 Top World News This Hour – {datetime.utcnow().strftime('%b %d, %H:%M UTC')}\n\n"
+    story_1 = stories[0]
+    
+    # Construct the text for the first tweet
+    text = (
+        intro + 
+        f"🔥 1. {story_1['headline']}\n\n"
+        f"{story_1['summary']}\n\n"
+        f"🔗 {story_1['link']}\n"
+        f"Source: {story_1['source']}\n"
+        f"\n#WorldNews #Breaking"
+    )
+    
+    # Truncate text to Twitter's limit
+    if len(text) > 280:
+        text = text[:277] + "..."
+
+    try:
+        resp = client.create_tweet(text=text)
+        prev_id = resp.data.id
+        print(f"Posted Tweet 1: {text[:30]}...")
+    except tweepy.TweepyException as e:
+        print(f"Error posting Tweet 1: {e}")
+        return
+
+
+    # --- Post Subsequent Replies ---
+    for i, s in enumerate(stories[1:], 2):
+        reply_text = (
+            f"👇 {i}. {s['headline']}\n\n"
+            f"{s['summary']}\n\n"
+            f"🔗 {s['link']}\n"
+            f"Source: {s['source']}\n"
+            f"\n#NewsUpdate"
+        )
+        
+        if len(reply_text) > 280:
+             reply_text = reply_text[:277] + "..."
+             
+        try:
+            resp = client.create_tweet(text=reply_text, in_reply_to_tweet_id=prev_id)
+            prev_id = resp.data.id
+            print(f"Posted Tweet {i}: {reply_text[:30]}...")
+        except tweepy.TweepyException as e:
+            print(f"Error posting Tweet {i}: {e}")
+            break # Stop the thread if a tweet fails
+
+    # --- Post Final Reply ---
+    try:
+        client.create_tweet(text="Which story do you find most impactful? 👇", in_reply_to_tweet_id=prev_id)
+        print("Posted final engagement tweet.")
+    except tweepy.TweepyException as e:
+        print(f"Error posting final tweet: {e}")
+
 
 if __name__ == "__main__":
-    print("Fetching top news via Grok API...")
-    stories = fetch_top_news_via_grok()
-    print(f"Found {len(stories)} stories.")
+    stories = fetch_news_gemini()
+    print("-" * 50)
+    print(f"Successfully Parsed {len(stories)} Stories:")
     for s in stories:
-        print(s)
+        print(f"  - {s['headline']} (Source: {s['source']})")
+    print("-" * 50)
     
-    print("\nPosting thread to X...")
-    post_engaging_thread(stories)
+    post_thread(stories)
