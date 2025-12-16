@@ -1,9 +1,10 @@
 import os
+import time # <-- NEW IMPORT for delays
 import requests
 import tweepy
 from dotenv import load_dotenv
 from datetime import datetime
-from google import genai # Import the official Gemini SDK
+from google import genai 
 from google.genai import types
 
 load_dotenv()
@@ -23,7 +24,6 @@ except Exception as e:
 
 # --- Configuration for Gemini API ---
 # Get the key from the environment variable GEMINI_API_KEY
-# You can get a key at Google AI Studio or Google Cloud Console.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") 
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not found in environment variables. Please set it in your .env file.")
@@ -58,50 +58,63 @@ def fetch_news_gemini():
     if gemini_client is None:
         return []
         
-    print("Fetching real-time news using Gemini and Google Search tool...")
+    MAX_RETRIES = 3 # <-- Set maximum retry attempts
     
-    try:
-        # Use the generate_content method and enable the google_search tool
-        # Gemini 2.5 Flash is fast and capable of using the search tool.
-        response = gemini_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=PROMPT,
-            config=types.GenerateContentConfig(
-                tools=[{"google_search": {}}] # This enables the real-time search
+    for attempt in range(MAX_RETRIES):
+        print(f"Fetching real-time news using Gemini (Attempt {attempt + 1}/{MAX_RETRIES})...")
+        
+        try:
+            # Use the generate_content method and enable the google_search tool
+            response = gemini_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=PROMPT,
+                config=types.GenerateContentConfig(
+                    tools=[{"google_search": {}}] # Enables real-time search
+                )
             )
-        )
-    except Exception as e:
-        print(f"Gemini API request failed: {e}")
+            
+            # If successful, break the retry loop and proceed to parsing
+            if response.text:
+                print(f"Successfully received response from Gemini on attempt {attempt + 1}.")
+                break
+                
+        except Exception as e:
+            error_message = str(e)
+            
+            # Check for the specific 503 error and if we have retries left
+            if "503 UNAVAILABLE" in error_message and attempt < MAX_RETRIES - 1:
+                # Exponential backoff: 1s, 2s, 4s delay
+                wait_time = 2 ** attempt 
+                print(f"Server overloaded (503). Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+                continue
+            else:
+                # Handle other permanent errors (401, 403, etc.) or final failure
+                print(f"Gemini API request failed permanently: {e}")
+                return []
+    else:
+        # This block executes if the loop finishes without a successful 'break'
+        print(f"Failed to get a successful response after {MAX_RETRIES} attempts.")
         return []
 
     content = response.text
-    print(f"Successfully received response from Gemini. Content length: {len(content)}")
+    print(f"Content length: {len(content)}")
     
-    # --- Robust Parsing (Adapted for consistent output) ---
+    # --- Robust Parsing ---
     stories = []
-    # Split content into blocks, using an aggressive delimiter that handles extra newlines
     blocks = [b.strip() for b in content.split('\n\n') if b.strip()]
     
     for block in blocks:
-        # Check if the block starts with a number followed by a dot (e.g., "1.")
         if block.startswith(('1.', '2.', '3.', '4.', '5.')):
             lines = [line.strip() for line in block.split('\n') if line.strip()]
             
-            # Simple check for minimum expected lines
             if len(lines) < 4:
                 continue
 
             try:
-                # 1. Headline (from the first line, after the number and dot)
                 headline = lines[0].split('.', 1)[1].strip()
-                
-                # 2. Summary (usually the second line)
                 summary = lines[1]
-                
-                # 3. Source (find the line starting with "Source:")
                 source = next((line.replace("Source:", "").strip() for line in lines if line.startswith("Source:")), "N/A")
-                
-                # 4. Link (find the line starting with "Link:")
                 link = next((line.replace("Link:", "").strip() for line in lines if line.startswith("Link:")), "N/A")
                 
                 stories.append({"headline": headline, "summary": summary, "source": source, "link": link})
