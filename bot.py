@@ -1,5 +1,5 @@
 import os
-import time # <-- NEW IMPORT for delays
+import time 
 import requests
 import tweepy
 from dotenv import load_dotenv
@@ -10,22 +10,32 @@ from google.genai import types
 load_dotenv()
 
 # --- Configuration for X/Twitter ---
-# Initialize the Twitter client (added try/except for safer execution)
-try:
-    client = tweepy.Client(
-        consumer_key=os.getenv("X_CONSUMER_KEY"),
-        consumer_secret=os.getenv("X_CONSUMER_SECRET"),
-        access_token=os.getenv("X_ACCESS_TOKEN"),
-        access_token_secret=os.getenv("X_ACCESS_TOKEN_SECRET")
-    )
-except Exception as e:
-    print(f"Warning: Twitter client setup failed. Tweets will not be posted. Error: {e}")
-    client = None
+# Get keys directly, checking for None to provide better error messages.
+X_CONSUMER_KEY = os.getenv("X_CONSUMER_KEY")
+X_CONSUMER_SECRET = os.getenv("X_CONSUMER_SECRET")
+X_ACCESS_TOKEN = os.getenv("X_ACCESS_TOKEN")
+X_ACCESS_TOKEN_SECRET = os.getenv("X_ACCESS_TOKEN_SECRET")
+
+# Initialize the Twitter client
+client = None
+if not all([X_CONSUMER_KEY, X_CONSUMER_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET]):
+    print("Warning: One or more X/Twitter keys are missing. Tweets will be skipped.")
+else:
+    try:
+        client = tweepy.Client(
+            consumer_key=X_CONSUMER_KEY,
+            consumer_secret=X_CONSUMER_SECRET,
+            access_token=X_ACCESS_TOKEN,
+            access_token_secret=X_ACCESS_TOKEN_SECRET
+        )
+    except Exception as e:
+        print(f"Error initializing Twitter client (Check key permissions/validity): {e}")
+
 
 # --- Configuration for Gemini API ---
-# Get the key from the environment variable GEMINI_API_KEY
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") 
 if not GEMINI_API_KEY:
+    # This is fine to raise an error if the key is mandatory for the main function
     raise ValueError("GEMINI_API_KEY not found in environment variables. Please set it in your .env file.")
 
 # Initialize the Gemini Client
@@ -46,8 +56,7 @@ Link: [Direct URL]
 
 2. [Short engaging headline]
 [One-sentence summary]
-Source: [Main source]
-Link: [Direct URL]
+Source: [Direct URL]
 
 3. ... (Continue up to 5)
 
@@ -58,22 +67,20 @@ def fetch_news_gemini():
     if gemini_client is None:
         return []
         
-    MAX_RETRIES = 3 # <-- Set maximum retry attempts
+    MAX_RETRIES = 3
     
     for attempt in range(MAX_RETRIES):
         print(f"Fetching real-time news using Gemini (Attempt {attempt + 1}/{MAX_RETRIES})...")
         
         try:
-            # Use the generate_content method and enable the google_search tool
             response = gemini_client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=PROMPT,
                 config=types.GenerateContentConfig(
-                    tools=[{"google_search": {}}] # Enables real-time search
+                    tools=[{"google_search": {}}]
                 )
             )
             
-            # If successful, break the retry loop and proceed to parsing
             if response.text:
                 print(f"Successfully received response from Gemini on attempt {attempt + 1}.")
                 break
@@ -81,19 +88,15 @@ def fetch_news_gemini():
         except Exception as e:
             error_message = str(e)
             
-            # Check for the specific 503 error and if we have retries left
             if "503 UNAVAILABLE" in error_message and attempt < MAX_RETRIES - 1:
-                # Exponential backoff: 1s, 2s, 4s delay
                 wait_time = 2 ** attempt 
                 print(f"Server overloaded (503). Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
                 continue
             else:
-                # Handle other permanent errors (401, 403, etc.) or final failure
                 print(f"Gemini API request failed permanently: {e}")
                 return []
     else:
-        # This block executes if the loop finishes without a successful 'break'
         print(f"Failed to get a successful response after {MAX_RETRIES} attempts.")
         return []
 
@@ -139,7 +142,6 @@ def post_thread(stories):
     intro = f"🌍 Top World News This Hour – {datetime.utcnow().strftime('%b %d, %H:%M UTC')}\n\n"
     story_1 = stories[0]
     
-    # Construct the text for the first tweet
     text = (
         intro + 
         f"🔥 1. {story_1['headline']}\n\n"
@@ -149,7 +151,6 @@ def post_thread(stories):
         f"\n#WorldNews #Breaking"
     )
     
-    # Truncate text to Twitter's limit
     if len(text) > 280:
         text = text[:277] + "..."
 
@@ -181,7 +182,7 @@ def post_thread(stories):
             print(f"Posted Tweet {i}: {reply_text[:30]}...")
         except tweepy.TweepyException as e:
             print(f"Error posting Tweet {i}: {e}")
-            break # Stop the thread if a tweet fails
+            break
 
     # --- Post Final Reply ---
     try:
