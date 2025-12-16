@@ -39,7 +39,7 @@ def fetch_top_news_last_hour() -> List[Tuple[int, str, str, str, str]]:
         consumer_key=CONSUMER_KEY,
         consumer_secret=CONSUMER_SECRET,
         access_token=ACCESS_TOKEN,
-        access_secret=ACCESS_SECRET,
+        access_token_secret=ACCESS_SECRET,
         wait_on_rate_limit=True
     )
 
@@ -111,7 +111,7 @@ def post_engaging_thread(top_stories: List[Tuple[int, str, str, str]]):
         consumer_key=CONSUMER_KEY,
         consumer_secret=CONSUMER_SECRET,
         access_token=ACCESS_TOKEN,
-        access_secret=ACCESS_SECRET,
+        access_token_secret=ACCESS_SECRET,
         wait_on_rate_limit=True
     )
 
