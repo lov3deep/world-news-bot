@@ -1,167 +1,124 @@
-import tweepy
-import datetime
 import os
-from typing import List, Tuple
+import datetime
+import requests
+import json
 
 # === CONFIGURATION ===
-# Fill in your X/Twitter API credentials (get them from https://developer.x.com)
-CONSUMER_KEY = "your_consumer_key"
-CONSUMER_SECRET = "your_consumer_secret"
-ACCESS_TOKEN = "your_access_token"
-ACCESS_SECRET = "your_access_secret"
-BEARER_TOKEN = "your_bearer_token"  # Optional but recommended
+XAI_API_KEY = "your_xai_api_key_here"  # From console.x.ai
+X_CONSUMER_KEY = "your_x_consumer_key"
+X_CONSUMER_SECRET = "your_x_consumer_secret"
+X_ACCESS_TOKEN = "your_x_access_token"
+X_ACCESS_SECRET = "your_x_access_token_secret"  # Fixed name
 
-# List of reputable worldwide news accounts (balanced sources)
-NEWS_ACCOUNTS = [
-    "Reuters", "AP", "BBCWorld", "AFP", "AlJazeera", 
-    "nytimes", "guardian", "WSJ", "CNN", "FoxNews"
-]
-
-# How many top stories to post in the thread
 TOP_N = 5
+MODEL = "grok-4"  # Or "grok-beta" / latest available
 
-# Engagement weight: likes + retweets + replies + quotes
-def calculate_engagement(metrics: dict) -> int:
-    return (metrics['like_count'] +
-            metrics['retweet_count'] +
-            metrics['reply_count'] +
-            metrics['quote_count'])
+# Grok prompt to get top news
+NEWS_PROMPT = """
+Provide a concise list of the top 5 most important worldwide news stories right now (last hour if possible).
+For each story:
+- Number it (1 to 5)
+- Give a short engaging headline (under 20 words)
+- One-sentence summary
+- Main source (e.g., Reuters, BBC) if known
+- Direct article link if available
 
-# === BOT LOGIC ===
-def fetch_top_news_last_hour() -> List[Tuple[int, str, str, str, str]]:
-    """
-    Fetch recent tweets from news accounts in the last completed hour,
-    sort by engagement, and return top stories with:
-    (engagement_score, headline_text, article_url, source_username)
-    """
-    client = tweepy.Client(
-        bearer_token=BEARER_TOKEN,
-        consumer_key=CONSUMER_KEY,
-        consumer_secret=CONSUMER_SECRET,
-        access_token=ACCESS_TOKEN,
-        access_token_secret=ACCESS_SECRET,
-        wait_on_rate_limit=True
-    )
+Focus on global impact, breaking events, politics, tech, disasters, etc.
+Rank by worldwide discussion and importance.
+Output only the numbered list — no intro text.
+"""
 
-    # Calculate time window for the previous completed hour (UTC)
-    now = datetime.datetime.utcnow()
-    end_time = now.replace(minute=0, second=0, microsecond=0)
-    start_time = end_time - datetime.timedelta(hours=1)
+def fetch_top_news_via_grok():
+    headers = {
+        "Authorization": f"Bearer {XAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": NEWS_PROMPT}],
+        "temperature": 0.7,
+        "max_tokens": 800,
+        # Enable real-time search/tools for fresh news
+        "search_parameters": {"mode": "auto"}  # Or enable_search: true if needed
+    }
 
-    # Build query: from any of the news accounts, exclude retweets
-    accounts_query = " OR ".join([f"from:{acc}" for acc in NEWS_ACCOUNTS])
-    query = f"({accounts_query}) -is:retweet"
-
-    # Search recent tweets
-    tweets = []
-    for response in tweepy.Paginator(
-        client.search_recent_tweets,
-        query=query,
-        start_time=start_time,
-        end_time=end_time,
-        tweet_fields=["public_metrics", "entities", "author_id"],
-        expansions=["author_id"],
-        max_results=100
-    ):
-        if not response.data:
-            continue
-
-        users = {u.id: u for u in response.includes.get("users", [])}
-
-        for tweet in response.data:
-            author = users.get(tweet.author_id)
-            if not author:
-                continue
-
-            # Extract first URL if present (usually the article link)
-            url = ""
-            if tweet.entities and "urls" in tweet.entities and tweet.entities["urls"]:
-                url = tweet.entities["urls"][0].get("expanded_url", "")
-
-            engagement = calculate_engagement(tweet.public_metrics)
-
-            tweets.append({
-                "engagement": engagement,
-                "text": tweet.text.strip(),
-                "url": url,
-                "username": author.username
-            })
-
-    # Sort by engagement descending
-    tweets.sort(key=lambda x: x["engagement"], reverse=True)
-
-    # Return top N
-    top_stories = []
-    for t in tweets[:TOP_N]:
-        top_stories.append((
-            t["engagement"],
-            t["text"],
-            t["url"],
-            t["username"]
-        ))
-
-    return top_stories
-
-def post_engaging_thread(top_stories: List[Tuple[int, str, str, str]]):
-    if not top_stories:
-        print("No top news found for this hour.")
-        return
-
-    client = tweepy.Client(
-        consumer_key=CONSUMER_KEY,
-        consumer_secret=CONSUMER_SECRET,
-        access_token=ACCESS_TOKEN,
-        access_token_secret=ACCESS_SECRET,
-        wait_on_rate_limit=True
-    )
-
-    # First tweet (intro + #1 story)
-    story = top_stories[0]
-    intro_text = "🌍 Top World News This Hour:\n\n"
-    story_text = f"🔥 1. {story[1]}\n\nSource: @{story[3]}"
-    if story[2]:
-        story_text += f"\n🔗 {story[2]}"
-    story_text += "\n\n#WorldNews #BreakingNews"
-    full_text = intro_text + story_text
-
-    response = client.create_tweet(text=full_text)
-    if not response.data:
-        print("Failed to post intro tweet.")
-        return
-    previous_id = response.data["id"]
-    print(f"Posted intro tweet: {previous_id}")
-
-    # Remaining stories as thread replies
-    for i, story in enumerate(top_stories[1:], start=2):
-        story_text = f"{i}. {story[1]}\n\nSource: @{story[3]}"
-        if story[2]:
-            story_text += f"\n🔗 {story[2]}"
-        story_text += f"\n\n(Thread {i}/{len(top_stories)}) #WorldNews"
-
-        response = client.create_tweet(
-            text=story_text,
-            in_reply_to_tweet_id=previous_id
-        )
-        if response.data:
-            previous_id = response.data["id"]
-            print(f"Posted thread tweet {i}: {previous_id}")
-        else:
-            print(f"Failed to post thread tweet {i}")
-
-    # Optional final tweet to boost engagement
-    client.create_tweet(
-        text="Which story shocked you the most? 👇 Reply below!\n#News",
-        in_reply_to_tweet_id=previous_id
-    )
-
-# === RUN THE BOT ===
-if __name__ == "__main__":
-    print("Fetching top news for the last hour...")
-    top_stories = fetch_top_news_last_hour()
+    response = requests.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
     
-    print(f"Found {len(top_stories)} top stories.")
-    for i, s in enumerate(top_stories, 1):
-        print(f"{i}. [{s[0]} engagement] @{s[3]}: {s[1][:80]}...")
+    if response.status_code != 200:
+        print(f"Error: {response.status_code} {response.text}")
+        return []
 
-    print("\nPosting engaging thread...")
-    post_engaging_thread(top_stories)
+    content = response.json()["choices"][0]["message"]["content"].strip()
+    lines = [line.strip() for line in content.split("\n") if line.strip() and not line.startswith("**")]
+    
+    stories = []
+    current = {}
+    for line in lines:
+        if line.startswith(("1.", "2.", "3.", "4.", "5.")):
+            if current:
+                stories.append(current)
+            current = {"num": line.split(".", 1)[0], "text": line.split(".", 1)[1].strip()}
+        elif "http" in line:
+            current["url"] = line
+        elif "Source:" in line.lower():
+            current["source"] = line
+        else:
+            current["text"] += " " + line
+    if current:
+        stories.append(current)
+    
+    return stories[:TOP_N]
+
+def post_engaging_thread(stories):
+    if not stories:
+        print("No news stories fetched.")
+        return
+
+    # Use requests for posting (simple v2 endpoint)
+    auth_headers = {
+        "Authorization": f"Bearer {os.getenv('X_BEARER_TOKEN', '')}",  # If you have it
+        "Content-Type": "application/json"
+    }
+    # Better: Use OAuth1 for posting (install requests-oauthlib or keep tweepy for posting only)
+    # Keeping tweepy for posting since it's easy
+    import tweepy
+    client = tweepy.Client(
+        consumer_key=X_CONSUMER_KEY,
+        consumer_secret=X_CONSUMER_SECRET,
+        access_token=X_ACCESS_TOKEN,
+        access_token_secret=X_ACCESS_SECRET
+    )
+
+    intro = "🌍 Top World News This Hour (via Grok real-time search):\n\n"
+    first_text = intro + f"🔥 {stories[0].get('num', '1')}. {stories[0].get('text', '')}"
+    if "url" in stories[0]:
+        first_text += f"\n🔗 {stories[0]['url']}"
+    first_text += "\n\n#WorldNews #BreakingNews"
+
+    resp = client.create_tweet(text=first_text)
+    if not resp.data:
+        return
+    prev_id = resp.data.id
+
+    for story in stories[1:]:
+        text = f"{story.get('num', '')}. {story.get('text', '')}"
+        if "url" in story:
+            text += f"\n🔗 {story['url']}"
+        text += f"\n\n(Thread) #WorldNews"
+        
+        resp = client.create_tweet(text=text, in_reply_to_tweet_id=prev_id)
+        if resp.data:
+            prev_id = resp.data.id
+
+    # Engagement booster
+    client.create_tweet(text="Which story surprises you most? Reply below! 👇", in_reply_to_tweet_id=prev_id)
+
+if __name__ == "__main__":
+    print("Fetching top news via Grok API...")
+    stories = fetch_top_news_via_grok()
+    print(f"Found {len(stories)} stories.")
+    for s in stories:
+        print(s)
+    
+    print("\nPosting thread to X...")
+    post_engaging_thread(stories)
