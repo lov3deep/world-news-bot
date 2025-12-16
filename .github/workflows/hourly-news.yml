@@ -20,10 +20,10 @@ jobs:
           pip install -r requirements.txt
       - name: Run the news bot
         env:
-          CONSUMER_KEY: ${{ secrets.CONSUMER_KEY }}
-          CONSUMER_SECRET: ${{ secrets.CONSUMER_SECRET }}
-          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
-          ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
+          X_CONSUMER_KEY: ${{ secrets.CONSUMER_KEY }}
+          X_CONSUMER_SECRET: ${{ secrets.CONSUMER_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.ACCESS_SECRET }}
           BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           
